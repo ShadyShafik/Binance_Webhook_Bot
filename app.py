@@ -11,7 +11,7 @@ TV_PASSPHRASE= os.getenv("TV_PASSPHRASE", "")
 MAX_POSITIONS= int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))  # we set to 1
 TP_PCT       = float(os.getenv("TP_PCT", "15"))  # +15% TP
 SL_PCT       = float(os.getenv("SL_PCT", "6"))   # -6%  SL
-SYMBOLS      = ["SOLUSD", "JUPUSD", "BONKUSD"]   # managed set
+SYMBOLS      = ["SOLUSDT", "JUPUSDT", "BONKUSDT"]   # managed set
 
 app = FastAPI()
 
@@ -199,4 +199,5 @@ async def tradingview(req: Request):
         return result
 
     return {"ok": False, "msg": f"Unknown event {event}"}
+
 
