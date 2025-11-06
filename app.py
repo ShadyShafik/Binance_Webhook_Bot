@@ -15,6 +15,10 @@ SYMBOLS      = ["SOLUSD", "JUPUSD", "BONKUSD"]   # managed set
 
 app = FastAPI()
 
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
 # ====== HTTP helper ======
 def _ts() -> str:
     return str(int(time.time() * 1000))
@@ -195,3 +199,4 @@ async def tradingview(req: Request):
         return result
 
     return {"ok": False, "msg": f"Unknown event {event}"}
+
