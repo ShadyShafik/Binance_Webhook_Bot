@@ -83,14 +83,16 @@ async def get_account() -> Dict[str, Any]:
     return await _req("GET", "/api/v3/account", signed=True)
 
 async def has_any_position() -> bool:
-    """Return True if we already hold any of SOL/JUP/BONK (free+locked > tiny)."""
     acct = await get_account()
     bal = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in acct["balances"]}
-    # map base assets from our symbols
-    bases = {"SOLUSD": "SOL", "JUPUSD": "JUP", "BONKUSD": "BONK"}
+
+    # Correct bases for USDT trading
+    bases = {"SOLUSDT": "SOL", "JUPUSDT": "JUP", "BONKUSDT": "BONK"}
+
     for sym, base in bases.items():
         if bal.get(base, 0.0) > 0.000001:
             return True
+
     return False
 
 # ====== Orders ======
@@ -199,6 +201,7 @@ async def tradingview(req: Request):
         return result
 
     return {"ok": False, "msg": f"Unknown event {event}"}
+
 
 
 
