@@ -186,9 +186,9 @@ async def tradingview(req: Request):
     notional_pct = float(body.get("notional_pct", 5.0))  # default 5% per alert
 
     map_event = {
-        "LONG_SOL":  "SOLUSD",
-        "LONG_JUP":  "JUPUSD",
-        "LONG_BONK": "BONKUSD"
+        "LONG_SOL":  "SOLUSDT",
+        "LONG_JUP":  "JUPUSDT",
+        "LONG_BONK": "BONKUSDT"
     }
 
     if event in map_event:
@@ -199,5 +199,6 @@ async def tradingview(req: Request):
         return result
 
     return {"ok": False, "msg": f"Unknown event {event}"}
+
 
 
