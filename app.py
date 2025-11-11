@@ -4,22 +4,18 @@ from fastapi import FastAPI, Request, HTTPException
 import httpx
 
 # ====== ENV ======
-BINANCE_BASE = os.getenv("BINANCE_BASE", "https://api.binance.us")
-API_KEY      = os.getenv("BINANCE_API_KEY", "")
-API_SECRET   = os.getenv("BINANCE_API_SECRET", "")
-TV_PASSPHRASE= os.getenv("TV_PASSPHRASE", "")
-MAX_POSITIONS= int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))  # we set to 1
-TP_PCT       = float(os.getenv("TP_PCT", "15"))  # +15% TP
-SL_PCT       = float(os.getenv("SL_PCT", "6"))   # -6%  SL
-SYMBOLS      = ["SOLUSDT", "JUPUSDT", "BONKUSDT"]   # managed set
+BINANCE_BASE   = os.getenv("BINANCE_BASE", "https://api.binance.us")
+API_KEY        = os.getenv("BINANCE_API_KEY", "")
+API_SECRET     = os.getenv("BINANCE_API_SECRET", "")
+TV_PASSPHRASE  = os.getenv("TV_PASSPHRASE", "")
+MAX_POSITIONS  = int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))   # default: 1
+TP_PCT         = float(os.getenv("TP_PCT", "15"))                  # +15% TP
+SL_PCT         = float(os.getenv("SL_PCT", "6"))                   # -6%  SL
+SYMBOLS        = ["SOLUSDT", "JUPUSDT", "BONKUSDT"]
 
 app = FastAPI()
 
-@app.get("/health")
-async def health():
-    return {"ok": True}
-
-# ====== HTTP helper ======
+# ----------------- Helpers -----------------
 def _ts() -> str:
     return str(int(time.time() * 1000))
 
@@ -33,9 +29,11 @@ async def _req(method: str, path: str, signed=False, params=None, headers=None):
     hdrs = headers or {}
     if signed:
         params["timestamp"] = _ts()
+        params["recvWindow"] = 5000
         signature = _sign(params)
         params["signature"] = signature
         hdrs["X-MBX-APIKEY"] = API_KEY
+
     async with httpx.AsyncClient(timeout=20) as c:
         if method == "GET":
             r = await c.get(url, params=params, headers=hdrs)
@@ -45,14 +43,17 @@ async def _req(method: str, path: str, signed=False, params=None, headers=None):
             r = await c.delete(url, params=params, headers=hdrs)
         else:
             raise ValueError("bad method")
+
     if r.status_code >= 400:
+        # surface exchange/body errors back to you
         raise HTTPException(status_code=r.status_code, detail=r.text)
+
     try:
         return r.json()
-    except:
+    except Exception:
         return {"text": r.text}
 
-# ====== Exchange info / filters ======
+# ----------------- Exchange Info / Filters -----------------
 EXINFO_CACHE: Dict[str, Dict[str, Any]] = {}
 
 async def get_symbol_filters(symbol: str) -> Dict[str, Any]:
@@ -65,16 +66,18 @@ async def get_symbol_filters(symbol: str) -> Dict[str, Any]:
             return s
     raise HTTPException(400, f"symbol {symbol} not found in exchangeInfo")
 
-def _step(n: float, step: float) -> float:
-    # floor to step
-    precision = max(0, -int(round(math.log10(step)))) if step > 0 else 8
-    return float((math.floor(n / step) * step))
+def _step_floor(n: float, step: float) -> float:
+    if step <= 0:
+        return n
+    return math.floor(n / step) * step
 
 def _round_to_tick(p: float, tick: float) -> float:
-    precision = max(0, -int(round(math.log10(tick)))) if tick > 0 else 8
+    if tick <= 0:
+        return p
+    precision = max(0, -int(round(math.log10(tick))))
     return float(f"{p:.{precision}f}")
 
-# ====== Account / Balances ======
+# ----------------- Account / Balances -----------------
 async def get_price(symbol: str) -> float:
     data = await _req("GET", "/api/v3/ticker/price", params={"symbol": symbol})
     return float(data["price"])
@@ -85,17 +88,10 @@ async def get_account() -> Dict[str, Any]:
 async def has_any_position() -> bool:
     acct = await get_account()
     bal = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in acct["balances"]}
-
-    # Correct bases for USDT trading
     bases = {"SOLUSDT": "SOL", "JUPUSDT": "JUP", "BONKUSDT": "BONK"}
+    return any(bal.get(base, 0.0) > 0.000001 for base in bases.values())
 
-    for sym, base in bases.items():
-        if bal.get(base, 0.0) > 0.000001:
-            return True
-
-    return False
-
-# ====== Orders ======
+# ----------------- Orders -----------------
 async def market_buy(symbol: str, qty: float):
     params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": f"{qty}"}
     return await _req("POST", "/api/v3/order", signed=True, params=params)
@@ -116,13 +112,11 @@ async def place_oco_sell(symbol: str, quantity: float, tp_price: float, sl_stop:
 async def open_orders(symbol: str):
     return await _req("GET", "/api/v3/openOrders", signed=True, params={"symbol": symbol})
 
-# ====== Sizing & placement ======
+# ----------------- Sizing & Placement -----------------
 async def entry_for_symbol(symbol: str, notional_pct: float):
-    # 1) Skip if already holding any managed symbol (max positions = 1)
     if MAX_POSITIONS == 1 and await has_any_position():
         return {"ok": False, "note": "Position already open on one of the managed symbols."}
 
-    # 2) Pull filters
     s = await get_symbol_filters(symbol)
     lot_step = None
     tick_size = None
@@ -132,7 +126,6 @@ async def entry_for_symbol(symbol: str, notional_pct: float):
         t = f["filterType"]
         if t == "LOT_SIZE":
             lot_step = float(f["stepSize"])
-            min_qty  = float(f["minQty"])
         elif t in ("MIN_NOTIONAL", "NOTIONAL"):
             min_notional = float(f.get("minNotional", f.get("notional", 10)))
         elif t == "PRICE_FILTER":
@@ -141,67 +134,66 @@ async def entry_for_symbol(symbol: str, notional_pct: float):
     if lot_step is None or tick_size is None:
         raise HTTPException(500, "Could not resolve LOT_SIZE or PRICE_FILTER")
 
-    # 3) Account/equity approximation (use USD balance for sizing)
+    # USD/USDT/BUSD/USDC balance pool
     acct = await get_account()
-    # Try to find USD / USDT cash pool
     usd = 0.0
     for b in acct["balances"]:
         if b["asset"] in ("USD", "USDT", "BUSD", "USDC"):
             usd += float(b["free"])
-    # if no stable balances are visible, we size off a fixed $600 baseline (fallback)
     if usd <= 0:
-        usd = 600.0
+        usd = 600.0  # fallback
 
-    notional = max(min_notional + 1.0, (usd * (notional_pct / 100.0)))
+    notional = max(min_notional + 1.0, usd * (notional_pct / 100.0))
     price = await get_price(symbol)
-    raw_qty = notional / price
-    qty = _step(raw_qty, lot_step)
+    qty = _step_floor(notional / price, lot_step)
     if qty <= 0:
         return {"ok": False, "note": f"Calculated qty too small. notional={notional} price={price} lot_step={lot_step}"}
 
-    # 4) Entry: market buy
     buy_res = await market_buy(symbol, qty)
 
-    # 5) OCO exit (TP and SL)
-    # TP +15%, SL -6% (from env)
     tp_price = _round_to_tick(price * (1 + TP_PCT / 100.0), tick_size)
     sl_stop  = _round_to_tick(price * (1 - SL_PCT / 100.0), tick_size)
-    # use stopLimit slightly under stop to ensure fill
     sl_limit = _round_to_tick(sl_stop * 0.999, tick_size)
 
     oco_res = await place_oco_sell(symbol, qty, tp_price, sl_stop, sl_limit)
-
     return {"ok": True, "buy": buy_res, "oco": oco_res, "tp": tp_price, "sl": sl_stop}
 
-# ====== API ======
+# ----------------- API -----------------
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    return {"ok": True, "tv_passphrase_len": len(TV_PASSPHRASE)}
 
 @app.post("/tv")
 async def tradingview(req: Request):
-    body = await req.json()
-    if body.get("passphrase") != TV_PASSPHRASE:
-        raise HTTPException(401, "bad passphrase")
+    # Try JSON; if that fails, try to parse text as JSON.
+    try:
+        body = await req.json()
+    except Exception:
+        raw = (await req.body()).decode("utf-8", errors="ignore").strip()
+        try:
+            body = json.loads(raw)
+        except Exception:
+            raise HTTPException(400, f"Invalid payload: expected JSON, got: '{raw[:80]}'")
+
+    p = body.get("passphrase", "")
+    if p != TV_PASSPHRASE:
+        raise HTTPException(401, f"bad passphrase (len {len(p)})")
 
     event = body.get("event", "")
-    notional_pct = float(body.get("notional_pct", 5.0))  # default 5% per alert
+    notional_pct = float(body.get("notional_pct", 5.0))
 
     map_event = {
         "LONG_SOL":  "SOLUSDT",
         "LONG_JUP":  "JUPUSDT",
-        "LONG_BONK": "BONKUSDT"
+        "LONG_BONK": "BONKUSDT",
     }
 
-    if event in map_event:
-        sym = map_event[event]
-        if sym not in SYMBOLS:
-            return {"ok": False, "msg": f"Unhandled symbol {sym}"}
-        result = await entry_for_symbol(sym, notional_pct)
-        return result
+    if event not in map_event:
+        return {"ok": False, "msg": f"Unknown event '{event}'"}
 
-    return {"ok": False, "msg": f"Unknown event {event}"}
+    sym = map_event[event]
+    if sym not in SYMBOLS:
+        return {"ok": False, "msg": f"Unhandled symbol {sym}"}
 
-
-
-
+    result = await entry_for_symbol(sym, notional_pct)
+    return result
